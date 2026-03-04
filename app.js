@@ -14,22 +14,31 @@ let currentEmotion = "Nötr";
 let recognition;
 let detectInterval;
 let aiTimeout;
+let audioContext, analyser, microphone, dataArray;
+let currentVocalStress = "Düşük"; // Ses stresi
+let lastFinalTranscript = "";
 
+// 1. Yüz Tanıma Modellerini Yükle
 Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri('https://vladmandic.github.io/face-api/model/'),
     faceapi.nets.faceExpressionNet.loadFromUri('https://vladmandic.github.io/face-api/model/')
 ]).then(() => {
     startBtn.innerText = "Analizi Başlat";
     startBtn.disabled = false;
-    faceStatus.innerText = "Sistem Hazır";
-    faceStatus.style.background = "rgba(74, 222, 128, 0.2)";
-    faceStatus.style.color = "#4ade80";
+    updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
 }).catch(err => {
     console.error("Modeller yüklenemedi:", err);
     startBtn.innerText = "Model Yükleme Hatası";
-    faceStatus.innerText = "Bağlantı Hatası";
+    updateBadge("Bağlantı Hatası", "#ef4444", "rgba(239, 68, 68, 0.2)");
 });
 
+function updateBadge(text, color, bg) {
+    faceStatus.innerText = text;
+    faceStatus.style.color = color;
+    faceStatus.style.background = bg;
+}
+
+// 2. Ses Analizi Kurulumu (Metne Çevirme)
 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SpeechRecognition();
@@ -38,88 +47,137 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     recognition.lang = 'tr-TR';
 
     recognition.onresult = (event) => {
-        let finalTranscript = '';
         let interimTranscript = '';
+        let hasFinal = false;
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
             if (event.results[i].isFinal) {
-                finalTranscript += event.results[i][0].transcript;
+                lastFinalTranscript += event.results[i][0].transcript + " ";
+                hasFinal = true;
             } else {
                 interimTranscript += event.results[i][0].transcript;
             }
         }
 
-        if (finalTranscript || interimTranscript) {
-            transcriptResult.innerText = finalTranscript || interimTranscript;
-        }
+        transcriptResult.innerText = lastFinalTranscript + interimTranscript;
 
-        if (finalTranscript.trim().length > 5) {
-            clearTimeout(aiTimeout);
-            aiResult.innerText = "✍️ Analiz için bekleniyor...";
+        // Cümle veya duraklama yakalandığında AI'yi tetikle
+        clearTimeout(aiTimeout);
+        if (lastFinalTranscript.trim().length > 3 || interimTranscript.trim().length > 3) {
+            aiResult.innerText = "✍️ Cümle bitimi bekleniyor...";
             aiTimeout = setTimeout(() => {
-                if (apiKey.value.trim() !== "") {
-                    analyzeWithAI(finalTranscript.trim(), currentEmotion);
-                } else {
-                    aiResult.innerText = "⚠️ Lütfen analiz için API anahtarınızı girin.";
+                const textToSend = (lastFinalTranscript + interimTranscript).trim();
+                if (textToSend && apiKey.value.trim() !== "") {
+                    analyzeWithAI(textToSend, currentEmotion, currentVocalStress);
+                    lastFinalTranscript = ""; // Gönderdikten sonra sıfırla
+                } else if (apiKey.value.trim() === "") {
+                    aiResult.innerText = "⚠️ Lütfen API anahtarınızı girin.";
                 }
-            }, 1000);
+            }, 1500); // 1.5 saniye susarsa tetikle
         }
     };
-    recognition.onerror = (e) => console.error("Ses tanıma hatası:", e);
+    recognition.onerror = (e) => {
+        console.error("Ses tanıma hatası:", e.error);
+        if(e.error === 'not-allowed') alert("Lütfen tarayıcıdan mikrofon izni verin!");
+    };
 } else {
     transcriptResult.innerText = "Tarayıcınız ses tanımayı desteklemiyor.";
 }
 
+// 3. Başlatma Fonksiyonu
 startBtn.addEventListener('click', async () => {
     try {
+        updateBadge("Kamera İzni Bekleniyor", "#fbbf24", "rgba(251, 191, 36, 0.2)");
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         video.srcObject = stream;
         startBtn.disabled = true;
         stopBtn.disabled = false;
         isAnalyzing = true;
+        lastFinalTranscript = "";
         
-        if (recognition) recognition.start();
+        setupAudioAnalysis(stream);
+
+        if (recognition) {
+            try { recognition.start(); } catch(e) {} // Zaten çalışıyorsa hata vermesin
+        }
         
-        video.addEventListener('loadedmetadata', () => {
-            const displaySize = { width: video.videoWidth, height: video.videoHeight };
+        video.addEventListener('play', () => {
+            // CSS object-fit sorununu çözmek için kesin boyutlar
+            const displaySize = { width: video.clientWidth, height: video.clientHeight };
             overlay.width = displaySize.width;
             overlay.height = displaySize.height;
             faceapi.matchDimensions(overlay, displaySize);
             detectFace(displaySize);
         });
     } catch (err) {
-        alert("Kamera ve mikrofon izni gereklidir.");
+        updateBadge("İzin Reddedildi", "#ef4444", "rgba(239, 68, 68, 0.2)");
+        alert("Kamera ve mikrofon izni vermeniz gerekiyor.");
         console.error(err);
     }
 });
 
 stopBtn.addEventListener('click', () => {
     const stream = video.srcObject;
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (audioContext) audioContext.close();
+    
     isAnalyzing = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
     clearTimeout(detectInterval);
     clearTimeout(aiTimeout);
     if (recognition) recognition.stop();
+    
     emotionResult.innerText = "Bekleniyor...";
-    faceStatus.innerText = "Durduruldu";
+    updateBadge("Durduruldu", "#94a3b8", "rgba(148, 163, 184, 0.2)");
     const context = overlay.getContext('2d');
     context.clearRect(0, 0, overlay.width, overlay.height);
 });
 
+// 4. Ses Tonu & Stres Analizi
+function setupAudioAnalysis(stream) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    microphone = audioContext.createMediaStreamSource(stream);
+    microphone.connect(analyser);
+    analyser.fftSize = 256;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    function checkStress() {
+        if (!isAnalyzing) return;
+        analyser.getByteFrequencyData(dataArray);
+        
+        // Seste yüksek frekans (titreme/bağırma) tespiti
+        let sum = 0;
+        for(let i=0; i<dataArray.length; i++) sum += dataArray[i];
+        let average = sum / dataArray.length;
+
+        if (average > 80) currentVocalStress = "Yüksek (Gergin/Tiz)";
+        else if (average > 40) currentVocalStress = "Orta";
+        else currentVocalStress = "Düşük (Sakin)";
+        
+        requestAnimationFrame(checkStress);
+    }
+    checkStress();
+}
+
+// 5. Yüz Tespiti Döngüsü
 async function detectFace(displaySize) {
     if (!isAnalyzing) return;
 
-    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.2 });
+    // Daha iyi eşleşme için video boyutunu sürekli güncelle
+    displaySize = { width: video.clientWidth, height: video.clientHeight };
+    faceapi.matchDimensions(overlay, displaySize);
+
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
     const detections = await faceapi.detectSingleFace(video, options).withFaceExpressions();
     
     const context = overlay.getContext('2d');
     context.clearRect(0, 0, overlay.width, overlay.height);
 
     if (detections) {
+        updateBadge("Yüz Tespit Edildi", "#fff", "rgba(59, 130, 246, 0.8)");
+        
         const resizedDetections = faceapi.resizeResults(detections, displaySize);
         faceapi.draw.drawDetections(overlay, resizedDetections);
         
@@ -131,27 +189,26 @@ async function detectFace(displaySize) {
             fearful: "Stresli/Korkmuş", disgusted: "Tiksinti", surprised: "Şaşkın"
         };
         currentEmotion = trEmotions[dominantEmotion] || dominantEmotion;
-        emotionResult.innerText = `${currentEmotion} (%${Math.round(expressions[dominantEmotion] * 100)})`;
+        emotionResult.innerText = `${currentEmotion} (%${Math.round(expressions[dominantEmotion] * 100)}) | Ses Stresi: ${currentVocalStress}`;
         
-        faceStatus.innerText = "Yüz Tespit Edildi";
-        faceStatus.style.background = "rgba(59, 130, 246, 0.8)";
-        faceStatus.style.color = "#fff";
     } else {
+        updateBadge("Yüz Aranıyor...", "#fff", "rgba(239, 68, 68, 0.8)");
         emotionResult.innerText = "Yüz algılanamadı";
-        faceStatus.innerText = "Yüz Aranıyor...";
-        faceStatus.style.background = "rgba(239, 68, 68, 0.8)";
-        faceStatus.style.color = "#fff";
     }
 
-    detectInterval = setTimeout(() => detectFace(displaySize), 200);
+    detectInterval = setTimeout(() => detectFace(displaySize), 150); // Hızlandırıldı
 }
 
-async function analyzeWithAI(text, emotion) {
+// 6. Yapay Zeka Karar Motoru
+async function analyzeWithAI(text, emotion, vocalStress) {
     aiResult.innerText = "🔄 Yapay Zeka analiz ediyor...";
     const modelType = aiModel.value;
     const key = apiKey.value.trim();
     
-    const prompt = `Bağlam: Kullanıcı kameraya bakıp şunu söyledi: "${text}". Yüz ifadesi: ${emotion}. Soru: Bir profil uzmanı olarak, bu kişi yalan söylüyor veya gergin olabilir mi? Yanıt: (Kısa, net ve tek cümlelik doğrudan yorum yap. Markdown kullanma.)`;
+    const prompt = `Bağlam: Kullanıcı "${text}" dedi. 
+Anlık Yüz İfadesi: ${emotion}. 
+Ses Tonu Gerginliği: ${vocalStress}. 
+Profil Uzmanı Rolü: Bu üç veriyi birleştirerek yalan/gerginlik analizi yap. Kısa, net, tek cümlelik sert bir dedektif yorumu yap. Markdown kullanma.`;
 
     try {
         if (modelType === "gemini") {
@@ -161,7 +218,7 @@ async function analyzeWithAI(text, emotion) {
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
-            aiResult.innerText = "🤖 " + data.candidates[0].content.parts[0].text.replace(/\*/g, '');
+            aiResult.innerText = "🕵️ " + data.candidates[0].content.parts[0].text.replace(/\*/g, '');
         } else if (modelType === "openai") {
             const res = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -169,7 +226,7 @@ async function analyzeWithAI(text, emotion) {
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
-            aiResult.innerText = "🤖 " + data.choices[0].message.content.replace(/\*/g, '');
+            aiResult.innerText = "🕵️ " + data.choices[0].message.content.replace(/\*/g, '');
         }
     } catch (err) {
         console.error(err);
