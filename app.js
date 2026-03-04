@@ -38,13 +38,19 @@ function updateBadge(text, color, bg) {
     faceStatus.style.background = bg;
 }
 
-// 2. Ses Analizi (Anlık Metin)
-if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+// 2. Ses Analizi (Anlık Metin) - DAHA SAĞLAM YAPI
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SpeechRecognition) {
     recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'tr-TR';
+
+    recognition.onstart = () => {
+        if(isAnalyzing && fullTranscriptBuffer === "") {
+            transcriptResult.innerText = "Mikrofon dinleniyor, lütfen konuşun...";
+        }
+    };
 
     recognition.onresult = (event) => {
         let interimTranscript = '';
@@ -66,11 +72,27 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             analyzeBtn.disabled = false;
         }
     };
+
     recognition.onerror = (e) => {
         console.error("Ses tanıma hatası:", e.error);
+        if(e.error === 'not-allowed') {
+            transcriptResult.innerText = "HATA: Mikrofon izni verilmemiş!";
+        } else if (e.error === 'no-speech') {
+            // Ses gelmedi, yeniden başlatmaya çalışacak
+        } else {
+            transcriptResult.innerText = "Ses Hatası: " + e.error;
+        }
     };
+
+    // Ses tanıma kendi kendine durursa (Chrome'un kronik sorunu), otomatik yeniden başlat
+    recognition.onend = () => {
+        if (isAnalyzing) {
+            try { recognition.start(); } catch(e) {}
+        }
+    };
+
 } else {
-    transcriptResult.innerText = "Tarayıcınız ses tanımayı desteklemiyor.";
+    transcriptResult.innerHTML = "<span style='color:#ef4444'>Tarayıcınız ses tanımayı desteklemiyor. Lütfen Chrome, Edge veya Safari kullanın.</span>";
 }
 
 // 3. Başlatma Fonksiyonu
@@ -83,7 +105,10 @@ startBtn.addEventListener('click', async () => {
         stopBtn.disabled = false;
         isAnalyzing = true;
         fullTranscriptBuffer = "";
-        transcriptResult.innerText = "Dinleniyor...";
+        
+        if (SpeechRecognition) {
+            transcriptResult.innerText = "Mikrofon başlatılıyor...";
+        }
         
         setupAudioAnalysis(stream);
 
@@ -124,9 +149,9 @@ stopBtn.addEventListener('click', () => {
 
 // Manuel AI Tetikleyici
 analyzeBtn.addEventListener('click', () => {
-    const textToAnalyze = transcriptResult.innerText.replace("Dinleniyor...", "").trim();
+    const textToAnalyze = transcriptResult.innerText.replace("Mikrofon dinleniyor, lütfen konuşun...", "").replace("Mikrofon başlatılıyor...", "").trim();
     if (textToAnalyze.length < 2) {
-        alert("Lütfen önce bir şeyler söyleyin.");
+        alert("Lütfen önce bir şeyler söyleyin (veya mikrofonun sizi duyduğundan emin olun).");
         return;
     }
     if (apiKey.value.trim() === "") {
@@ -136,7 +161,7 @@ analyzeBtn.addEventListener('click', () => {
     analyzeWithAI(textToAnalyze, currentEmotion, currentVocalStress);
     // Yeni cümleler için buffer'ı temizle
     fullTranscriptBuffer = "";
-    transcriptResult.innerText = "Söyledikleriniz burada görünecek...";
+    transcriptResult.innerText = "Yeni analiz için konuşabilirsiniz...";
     analyzeBtn.disabled = true;
 });
 
