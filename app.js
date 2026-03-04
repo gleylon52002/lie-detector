@@ -2,6 +2,7 @@ const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
+const analyzeBtn = document.getElementById('analyzeBtn');
 const aiModel = document.getElementById('aiModel');
 const apiKey = document.getElementById('apiKey');
 const emotionResult = document.getElementById('emotionResult');
@@ -13,17 +14,16 @@ let isAnalyzing = false;
 let currentEmotion = "Nötr";
 let recognition;
 let detectInterval;
-let aiTimeout;
 let audioContext, analyser, microphone, dataArray;
 let currentVocalStress = "Düşük";
-let lastFinalTranscript = "";
+let fullTranscriptBuffer = "";
 
 // 1. Modelleri Yükle
 Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri('https://vladmandic.github.io/face-api/model/'),
     faceapi.nets.faceExpressionNet.loadFromUri('https://vladmandic.github.io/face-api/model/')
 ]).then(() => {
-    startBtn.innerText = "Analizi Başlat";
+    startBtn.innerText = "Sistemi Başlat";
     startBtn.disabled = false;
     updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
 }).catch(err => {
@@ -48,31 +48,22 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
 
     recognition.onresult = (event) => {
         let interimTranscript = '';
+        let finalTranscriptPiece = '';
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
             if (event.results[i].isFinal) {
-                lastFinalTranscript += event.results[i][0].transcript + " ";
+                finalTranscriptPiece += event.results[i][0].transcript + " ";
             } else {
                 interimTranscript += event.results[i][0].transcript;
             }
         }
 
-        // Anlık olarak ekrana yaz
-        transcriptResult.innerText = lastFinalTranscript + interimTranscript;
-
-        clearTimeout(aiTimeout);
-        let fullText = (lastFinalTranscript + interimTranscript).trim();
+        fullTranscriptBuffer += finalTranscriptPiece;
+        let currentDisplay = (fullTranscriptBuffer + interimTranscript).trim();
         
-        if (fullText.length > 5) {
-            aiResult.innerHTML = "<em>Cümle bitimi dinleniyor...</em>";
-            aiTimeout = setTimeout(() => {
-                if (apiKey.value.trim() !== "") {
-                    analyzeWithAI(fullText, currentEmotion, currentVocalStress);
-                    lastFinalTranscript = ""; // Sorgudan sonra temizle
-                } else {
-                    aiResult.innerHTML = "<span style='color:#ef4444'>⚠️ Lütfen API anahtarınızı girin.</span>";
-                }
-            }, 1000); // Sadece 1 saniye susarsa hemen AI yolla
+        if(currentDisplay.length > 0) {
+            transcriptResult.innerText = currentDisplay;
+            analyzeBtn.disabled = false;
         }
     };
     recognition.onerror = (e) => {
@@ -91,7 +82,8 @@ startBtn.addEventListener('click', async () => {
         startBtn.disabled = true;
         stopBtn.disabled = false;
         isAnalyzing = true;
-        lastFinalTranscript = "";
+        fullTranscriptBuffer = "";
+        transcriptResult.innerText = "Dinleniyor...";
         
         setupAudioAnalysis(stream);
 
@@ -120,14 +112,32 @@ stopBtn.addEventListener('click', () => {
     isAnalyzing = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    analyzeBtn.disabled = true;
     clearTimeout(detectInterval);
-    clearTimeout(aiTimeout);
     if (recognition) recognition.stop();
     
     emotionResult.innerText = "Bekleniyor...";
     updateBadge("Durduruldu", "#94a3b8", "rgba(148, 163, 184, 0.2)");
     const context = overlay.getContext('2d');
     context.clearRect(0, 0, overlay.width, overlay.height);
+});
+
+// Manuel AI Tetikleyici
+analyzeBtn.addEventListener('click', () => {
+    const textToAnalyze = transcriptResult.innerText.replace("Dinleniyor...", "").trim();
+    if (textToAnalyze.length < 2) {
+        alert("Lütfen önce bir şeyler söyleyin.");
+        return;
+    }
+    if (apiKey.value.trim() === "") {
+        alert("Lütfen API anahtarınızı girin.");
+        return;
+    }
+    analyzeWithAI(textToAnalyze, currentEmotion, currentVocalStress);
+    // Yeni cümleler için buffer'ı temizle
+    fullTranscriptBuffer = "";
+    transcriptResult.innerText = "Söyledikleriniz burada görünecek...";
+    analyzeBtn.disabled = true;
 });
 
 // 4. Ses Tonu & Stres Analizi
@@ -190,7 +200,7 @@ async function detectFace(displaySize) {
         emotionResult.innerText = "Yüz algılanamadı";
     }
 
-    detectInterval = setTimeout(() => detectFace(displaySize), 100); // Daha da hızlandırıldı
+    detectInterval = setTimeout(() => detectFace(displaySize), 100);
 }
 
 // 6. Yapay Zeka (İlerleme Çubuğu ve API)
@@ -198,7 +208,6 @@ async function analyzeWithAI(text, emotion, vocalStress) {
     const modelType = aiModel.value;
     const key = apiKey.value.trim();
     
-    // İlerleme Animasyonu (Anlık Hissiyat)
     aiResult.innerHTML = `
         <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9em; color:#94a3b8;">
             <span>Yapay Zeka Sunucuya Bağlanıyor...</span>
@@ -213,10 +222,9 @@ async function analyzeWithAI(text, emotion, vocalStress) {
     const progressText = document.getElementById('aiProgressText');
     let progress = 0;
     
-    // Sahte bir yükleme animasyonu (API cevabını beklerken can sıkıntısını alır)
     const progressInterval = setInterval(() => {
         progress += Math.floor(Math.random() * 15) + 5;
-        if (progress > 90) progress = 90; // Yüzde 90'da bekler (API yanıtına kadar)
+        if (progress > 90) progress = 90;
         progressBar.style.width = progress + '%';
         progressText.innerText = progress + '%';
     }, 150);
@@ -243,7 +251,6 @@ async function analyzeWithAI(text, emotion, vocalStress) {
             aiResponse = data.choices[0].message.content;
         }
 
-        // Başarılı tamamlama
         clearInterval(progressInterval);
         progressBar.style.width = '100%';
         progressText.innerText = '100%';

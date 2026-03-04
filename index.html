@@ -20,7 +20,7 @@
                 <option value="openai">OpenAI GPT-4o Mini</option>
             </select>
             <input type="password" id="apiKey" placeholder="API Anahtarınızı Girin">
-            <button id="startBtn">Analizi Başlat</button>
+            <button id="startBtn">Sistemi Başlat</button>
             <button id="stopBtn" disabled>Durdur</button>
         </div>
 
@@ -32,21 +32,22 @@
 
         <div class="analysis-panel">
             <div class="box">
-                <h3><span class="icon">👁️</span> Tespit Edilen Duygu</h3>
+                <h3><span class="icon">👁️</span> Tespit Edilen Duygu & Ses</h3>
                 <p id="emotionResult" class="highlight-text">Bekleniyor...</p>
             </div>
-            <div class="box">
+            <div class="box" style="position:relative;">
                 <h3><span class="icon">🎤</span> Söylenen Cümle</h3>
-                <p id="transcriptResult">Söyledikleriniz burada görünecek...</p>
+                <p id="transcriptResult" style="margin-bottom: 50px;">Söyledikleriniz burada görünecek...</p>
+                <button id="analyzeBtn" disabled class="trigger-btn">🧠 AI Analizi Yap</button>
             </div>
             <div class="box full-width ai-box">
                 <h3><span class="icon">🧠</span> Yapay Zeka Yorumu</h3>
-                <p id="aiResult">API anahtarı girip konuştuğunuzda sonuçlar burada belirecek.</p>
+                <p id="aiResult">"AI Analizi Yap" butonuna bastığınızda sonuçlar burada belirecek.</p>
             </div>
         </div>
         
         <footer>
-            <span class="version">v1.0.4</span>
+            <span class="version">v1.0.5</span>
         </footer>
     </div>
 
