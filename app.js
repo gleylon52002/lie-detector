@@ -15,10 +15,10 @@ let recognition;
 let detectInterval;
 let aiTimeout;
 let audioContext, analyser, microphone, dataArray;
-let currentVocalStress = "Düşük"; // Ses stresi
+let currentVocalStress = "Düşük";
 let lastFinalTranscript = "";
 
-// 1. Yüz Tanıma Modellerini Yükle
+// 1. Modelleri Yükle
 Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri('https://vladmandic.github.io/face-api/model/'),
     faceapi.nets.faceExpressionNet.loadFromUri('https://vladmandic.github.io/face-api/model/')
@@ -38,7 +38,7 @@ function updateBadge(text, color, bg) {
     faceStatus.style.background = bg;
 }
 
-// 2. Ses Analizi Kurulumu (Metne Çevirme)
+// 2. Ses Analizi (Anlık Metin)
 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SpeechRecognition();
@@ -48,37 +48,35 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
 
     recognition.onresult = (event) => {
         let interimTranscript = '';
-        let hasFinal = false;
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
             if (event.results[i].isFinal) {
                 lastFinalTranscript += event.results[i][0].transcript + " ";
-                hasFinal = true;
             } else {
                 interimTranscript += event.results[i][0].transcript;
             }
         }
 
+        // Anlık olarak ekrana yaz
         transcriptResult.innerText = lastFinalTranscript + interimTranscript;
 
-        // Cümle veya duraklama yakalandığında AI'yi tetikle
         clearTimeout(aiTimeout);
-        if (lastFinalTranscript.trim().length > 3 || interimTranscript.trim().length > 3) {
-            aiResult.innerText = "✍️ Cümle bitimi bekleniyor...";
+        let fullText = (lastFinalTranscript + interimTranscript).trim();
+        
+        if (fullText.length > 5) {
+            aiResult.innerHTML = "<em>Cümle bitimi dinleniyor...</em>";
             aiTimeout = setTimeout(() => {
-                const textToSend = (lastFinalTranscript + interimTranscript).trim();
-                if (textToSend && apiKey.value.trim() !== "") {
-                    analyzeWithAI(textToSend, currentEmotion, currentVocalStress);
-                    lastFinalTranscript = ""; // Gönderdikten sonra sıfırla
-                } else if (apiKey.value.trim() === "") {
-                    aiResult.innerText = "⚠️ Lütfen API anahtarınızı girin.";
+                if (apiKey.value.trim() !== "") {
+                    analyzeWithAI(fullText, currentEmotion, currentVocalStress);
+                    lastFinalTranscript = ""; // Sorgudan sonra temizle
+                } else {
+                    aiResult.innerHTML = "<span style='color:#ef4444'>⚠️ Lütfen API anahtarınızı girin.</span>";
                 }
-            }, 1500); // 1.5 saniye susarsa tetikle
+            }, 1000); // Sadece 1 saniye susarsa hemen AI yolla
         }
     };
     recognition.onerror = (e) => {
         console.error("Ses tanıma hatası:", e.error);
-        if(e.error === 'not-allowed') alert("Lütfen tarayıcıdan mikrofon izni verin!");
     };
 } else {
     transcriptResult.innerText = "Tarayıcınız ses tanımayı desteklemiyor.";
@@ -98,11 +96,10 @@ startBtn.addEventListener('click', async () => {
         setupAudioAnalysis(stream);
 
         if (recognition) {
-            try { recognition.start(); } catch(e) {} // Zaten çalışıyorsa hata vermesin
+            try { recognition.start(); } catch(e) {}
         }
         
         video.addEventListener('play', () => {
-            // CSS object-fit sorununu çözmek için kesin boyutlar
             const displaySize = { width: video.clientWidth, height: video.clientHeight };
             overlay.width = displaySize.width;
             overlay.height = displaySize.height;
@@ -112,7 +109,6 @@ startBtn.addEventListener('click', async () => {
     } catch (err) {
         updateBadge("İzin Reddedildi", "#ef4444", "rgba(239, 68, 68, 0.2)");
         alert("Kamera ve mikrofon izni vermeniz gerekiyor.");
-        console.error(err);
     }
 });
 
@@ -147,7 +143,6 @@ function setupAudioAnalysis(stream) {
         if (!isAnalyzing) return;
         analyser.getByteFrequencyData(dataArray);
         
-        // Seste yüksek frekans (titreme/bağırma) tespiti
         let sum = 0;
         for(let i=0; i<dataArray.length; i++) sum += dataArray[i];
         let average = sum / dataArray.length;
@@ -165,11 +160,10 @@ function setupAudioAnalysis(stream) {
 async function detectFace(displaySize) {
     if (!isAnalyzing) return;
 
-    // Daha iyi eşleşme için video boyutunu sürekli güncelle
     displaySize = { width: video.clientWidth, height: video.clientHeight };
     faceapi.matchDimensions(overlay, displaySize);
 
-    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.2 });
     const detections = await faceapi.detectSingleFace(video, options).withFaceExpressions();
     
     const context = overlay.getContext('2d');
@@ -196,21 +190,41 @@ async function detectFace(displaySize) {
         emotionResult.innerText = "Yüz algılanamadı";
     }
 
-    detectInterval = setTimeout(() => detectFace(displaySize), 150); // Hızlandırıldı
+    detectInterval = setTimeout(() => detectFace(displaySize), 100); // Daha da hızlandırıldı
 }
 
-// 6. Yapay Zeka Karar Motoru
+// 6. Yapay Zeka (İlerleme Çubuğu ve API)
 async function analyzeWithAI(text, emotion, vocalStress) {
-    aiResult.innerText = "🔄 Yapay Zeka analiz ediyor...";
     const modelType = aiModel.value;
     const key = apiKey.value.trim();
     
-    const prompt = `Bağlam: Kullanıcı "${text}" dedi. 
-Anlık Yüz İfadesi: ${emotion}. 
-Ses Tonu Gerginliği: ${vocalStress}. 
-Profil Uzmanı Rolü: Bu üç veriyi birleştirerek yalan/gerginlik analizi yap. Kısa, net, tek cümlelik sert bir dedektif yorumu yap. Markdown kullanma.`;
+    // İlerleme Animasyonu (Anlık Hissiyat)
+    aiResult.innerHTML = `
+        <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9em; color:#94a3b8;">
+            <span>Yapay Zeka Sunucuya Bağlanıyor...</span>
+            <span id="aiProgressText">0%</span>
+        </div>
+        <div style="width:100%; height:6px; background:#334155; border-radius:3px; overflow:hidden;">
+            <div id="aiProgressBar" style="width:0%; height:100%; background:#a855f7; transition:width 0.1s linear;"></div>
+        </div>
+    `;
+
+    const progressBar = document.getElementById('aiProgressBar');
+    const progressText = document.getElementById('aiProgressText');
+    let progress = 0;
+    
+    // Sahte bir yükleme animasyonu (API cevabını beklerken can sıkıntısını alır)
+    const progressInterval = setInterval(() => {
+        progress += Math.floor(Math.random() * 15) + 5;
+        if (progress > 90) progress = 90; // Yüzde 90'da bekler (API yanıtına kadar)
+        progressBar.style.width = progress + '%';
+        progressText.innerText = progress + '%';
+    }, 150);
+
+    const prompt = `Bağlam: "${text}". Yüz: ${emotion}. Ses: ${vocalStress}. Profil Uzmanı: Yalan mı söylüyor, gergin mi? Tek cümlelik sert teşhis koy. (Markdown yok)`;
 
     try {
+        let aiResponse = "";
         if (modelType === "gemini") {
             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
@@ -218,7 +232,7 @@ Profil Uzmanı Rolü: Bu üç veriyi birleştirerek yalan/gerginlik analizi yap.
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
-            aiResult.innerText = "🕵️ " + data.candidates[0].content.parts[0].text.replace(/\*/g, '');
+            aiResponse = data.candidates[0].content.parts[0].text;
         } else if (modelType === "openai") {
             const res = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -226,10 +240,24 @@ Profil Uzmanı Rolü: Bu üç veriyi birleştirerek yalan/gerginlik analizi yap.
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
-            aiResult.innerText = "🕵️ " + data.choices[0].message.content.replace(/\*/g, '');
+            aiResponse = data.choices[0].message.content;
         }
+
+        // Başarılı tamamlama
+        clearInterval(progressInterval);
+        progressBar.style.width = '100%';
+        progressText.innerText = '100%';
+        
+        setTimeout(() => {
+            aiResult.innerHTML = `<span style="color:#d8b4fe">🕵️ ${aiResponse.replace(/\*/g, '')}</span>`;
+        }, 200);
+
     } catch (err) {
-        console.error(err);
-        aiResult.innerText = "❌ API Hatası: " + (err.message || "Bağlantı kurulamadı.");
+        clearInterval(progressInterval);
+        progressBar.style.background = '#ef4444';
+        progressText.innerText = 'HATA';
+        setTimeout(() => {
+            aiResult.innerHTML = `<span style="color:#ef4444">❌ API Hatası: ${err.message || "Bağlantı kurulamadı."}</span>`;
+        }, 500);
     }
 }
