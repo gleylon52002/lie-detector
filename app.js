@@ -10,36 +10,11 @@ const aiResult = document.getElementById('aiResult');
 
 let isAnalyzing = false;
 let currentEmotion = "Nötr";
-let lastTranscript = "";
 let recognition;
 let detectInterval;
+let aiTimeout;
 
-// Speech Recognition Setup
-if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.lang = 'tr-TR';
-
-    recognition.onresult = (event) => {
-        const transcript = event.results[event.results.length - 1][0].transcript.trim();
-        transcriptResult.innerText = transcript;
-        lastTranscript = transcript;
-        
-        if (apiKey.value.trim() !== "") {
-            analyzeWithAI(transcript, currentEmotion);
-        } else {
-            aiResult.innerText = "Lütfen AI yorumu için API anahtarınızı girin.";
-        }
-    };
-    
-    recognition.onerror = (e) => console.error("Ses tanıma hatası:", e);
-} else {
-    transcriptResult.innerText = "Tarayıcınız ses tanımayı desteklemiyor (Chrome veya Edge kullanın).";
-}
-
-// Face API Models Load
+// Modelleri Yükle
 Promise.all([
     faceapi.nets.tinyFaceDetector.loadFromUri('https://vladmandic.github.io/face-api/model/'),
     faceapi.nets.faceExpressionNet.loadFromUri('https://vladmandic.github.io/face-api/model/')
@@ -51,6 +26,48 @@ Promise.all([
     startBtn.innerText = "Model Yükleme Hatası";
 });
 
+// Ses Tanıma Ayarları
+if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true; // Anlık kelimeleri gör ama API'ye yollama
+    recognition.lang = 'tr-TR';
+
+    recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+                finalTranscript += event.results[i][0].transcript;
+            } else {
+                interimTranscript += event.results[i][0].transcript;
+            }
+        }
+
+        if (finalTranscript || interimTranscript) {
+            transcriptResult.innerText = finalTranscript || interimTranscript;
+        }
+
+        // Token tasarrufu: Sadece kullanıcı cümleyi bitirdiğinde (isFinal) veya 2 saniye sustuğunda AI'ya yolla
+        if (finalTranscript.trim().length > 5) {
+            clearTimeout(aiTimeout);
+            aiTimeout = setTimeout(() => {
+                if (apiKey.value.trim() !== "") {
+                    analyzeWithAI(finalTranscript.trim(), currentEmotion);
+                } else {
+                    aiResult.innerText = "Lütfen analiz için API anahtarınızı girin.";
+                }
+            }, 1500); // 1.5 saniye bekle (cümle tam bitsin)
+        }
+    };
+    
+    recognition.onerror = (e) => console.error("Ses tanıma hatası:", e);
+} else {
+    transcriptResult.innerText = "Tarayıcınız ses tanımayı desteklemiyor.";
+}
+
 startBtn.addEventListener('click', async () => {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -58,6 +75,7 @@ startBtn.addEventListener('click', async () => {
         startBtn.disabled = true;
         stopBtn.disabled = false;
         isAnalyzing = true;
+        
         if (recognition) recognition.start();
         
         video.addEventListener('play', () => {
@@ -80,6 +98,7 @@ stopBtn.addEventListener('click', () => {
     startBtn.disabled = false;
     stopBtn.disabled = true;
     clearTimeout(detectInterval);
+    clearTimeout(aiTimeout);
     if (recognition) recognition.stop();
     emotionResult.innerText = "Bekleniyor...";
 });
@@ -87,12 +106,15 @@ stopBtn.addEventListener('click', () => {
 async function detectFace(displaySize) {
     if (!isAnalyzing) return;
 
-    const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceExpressions();
+    // Yüz tespiti eşiğini düşürerek daha rahat algılamasını sağladık (inputSize 160 -> 224, scoreThreshold 0.5 -> 0.3)
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
+    const detections = await faceapi.detectSingleFace(video, options).withFaceExpressions();
     
+    const context = overlay.getContext('2d');
+    context.clearRect(0, 0, overlay.width, overlay.height);
+
     if (detections) {
         const resizedDetections = faceapi.resizeResults(detections, displaySize);
-        const context = overlay.getContext('2d');
-        context.clearRect(0, 0, overlay.width, overlay.height);
         faceapi.draw.drawDetections(overlay, resizedDetections);
         
         const expressions = detections.expressions;
@@ -104,9 +126,11 @@ async function detectFace(displaySize) {
         };
         currentEmotion = trEmotions[dominantEmotion] || dominantEmotion;
         emotionResult.innerText = `${currentEmotion} (%${Math.round(expressions[dominantEmotion] * 100)})`;
+    } else {
+        emotionResult.innerText = "Yüz algılanamadı (Kameraya tam bakın)";
     }
 
-    detectInterval = setTimeout(() => detectFace(displaySize), 500); // 2 FPS to save CPU
+    detectInterval = setTimeout(() => detectFace(displaySize), 500); // Saniyede 2 kez (Performans için)
 }
 
 async function analyzeWithAI(text, emotion) {
@@ -114,26 +138,29 @@ async function analyzeWithAI(text, emotion) {
     const modelType = aiModel.value;
     const key = apiKey.value.trim();
     
-    const prompt = `Bir kullanıcı kameraya bakarak şu cümleyi kurdu: "${text}". Bu sırada yüzünde tespit edilen baskın duygu durumu: "${emotion}". Bir yalan makinesi veya profil uzmanı gibi davran. Bu duygu ve cümlenin bağlamına göre kişi yalan söylüyor veya gergin olabilir mi? Kısa, net, 2-3 cümlelik bir analiz yap. Türkçe cevap ver.`;
+    // Prompt optimize edildi (Minimum token, maksimum netlik)
+    const prompt = `Bağlam: Kullanıcı "${text}" dedi. Yüz ifadesi: ${emotion}. Soru: Bu kişi yalan söylüyor veya gergin olabilir mi? Yanıt: (Kısa, net, tek cümlelik analiz)`;
 
     try {
         if (modelType === "gemini") {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${key}`, {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
             });
             const data = await res.json();
+            if(data.error) throw new Error(data.error.message);
             aiResult.innerText = data.candidates[0].content.parts[0].text;
         } else if (modelType === "openai") {
             const res = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-                body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: prompt }] })
+                body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] })
             });
             const data = await res.json();
+            if(data.error) throw new Error(data.error.message);
             aiResult.innerText = data.choices[0].message.content;
         }
     } catch (err) {
         console.error(err);
-        aiResult.innerText = "API Bağlantı Hatası. Anahtarınızı kontrol edin.";
+        aiResult.innerText = "API Hatası: " + (err.message || "Bağlantı kurulamadı.");
     }
 }
