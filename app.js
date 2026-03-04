@@ -23,52 +23,57 @@ const AppState = {
 };
 
 // 2. WEB WORKER SETUP (Ağır İşlemi Ana Threadden Çıkarıyoruz)
-const faceWorker = new Worker('faceWorker.js');
-const hiddenCanvas = document.createElement('canvas');
-const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+let faceWorker;
+try {
+    faceWorker = new Worker('faceWorker.js');
+    const hiddenCanvas = document.createElement('canvas');
+    const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
 
-faceWorker.postMessage({ type: 'INIT' });
+    faceWorker.postMessage({ type: 'INIT' });
 
-faceWorker.onmessage = (e) => {
-    if (e.data.type === 'STATUS') {
-        if (e.data.status === 'READY') {
-            AppState.workerReady = true;
-            startBtn.innerText = "Sistemi Başlat";
-            startBtn.disabled = false;
-            updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
-        } else {
-            console.error(e.data.error);
-            updateBadge("Model Yükleme Hatası", "#ef4444", "rgba(239, 68, 68, 0.2)");
+    faceWorker.onmessage = (e) => {
+        if (e.data.type === 'STATUS') {
+            if (e.data.status === 'READY') {
+                AppState.workerReady = true;
+                startBtn.innerText = "Sistemi Başlat";
+                startBtn.disabled = false;
+                updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
+            } else {
+                console.error(e.data.error);
+                updateBadge("Model Yükleme Hatası", "#ef4444", "rgba(239, 68, 68, 0.2)");
+            }
         }
-    }
 
-    if (e.data.type === 'RESULT' && AppState.isAnalyzing) {
-        const ctx = overlay.getContext('2d');
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        if (e.data.type === 'RESULT' && AppState.isAnalyzing) {
+            const ctx = overlay.getContext('2d');
+            ctx.clearRect(0, 0, overlay.width, overlay.height);
 
-        if (e.data.success) {
-            updateBadge("Yüz Tespit Edildi", "#fff", "rgba(59, 130, 246, 0.8)");
-            
-            // Koordinatları manuel çiz
-            const box = e.data.box;
-            ctx.strokeStyle = "#4ade80";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(box.x, box.y, box.width, box.height);
-            
-            const trEmotions = {
-                neutral: "Nötr", happy: "Mutlu", sad: "Üzgün", angry: "Kızgın",
-                fearful: "Stresli/Korkmuş", disgusted: "Tiksinti", surprised: "Şaşkın"
-            };
-            AppState.faceEmotion = trEmotions[e.data.emotion] || e.data.emotion;
-            const percent = Math.round(e.data.expressions[e.data.emotion] * 100);
-            
-            emotionResult.innerText = `${AppState.faceEmotion} (%${percent}) | Ses Stresi: ${AppState.stressLevel}`;
-        } else {
-            updateBadge("Yüz Aranıyor...", "#fff", "rgba(239, 68, 68, 0.8)");
-            emotionResult.innerText = "Yüz algılanamadı";
+            if (e.data.success) {
+                updateBadge("Yüz Tespit Edildi", "#fff", "rgba(59, 130, 246, 0.8)");
+                
+                const box = e.data.box;
+                ctx.strokeStyle = "#4ade80";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(box.x, box.y, box.width, box.height);
+                
+                const trEmotions = {
+                    neutral: "Nötr", happy: "Mutlu", sad: "Üzgün", angry: "Kızgın",
+                    fearful: "Stresli/Korkmuş", disgusted: "Tiksinti", surprised: "Şaşkın"
+                };
+                AppState.faceEmotion = trEmotions[e.data.emotion] || e.data.emotion;
+                const percent = Math.round(e.data.expressions[e.data.emotion] * 100);
+                
+                emotionResult.innerText = `${AppState.faceEmotion} (%${percent}) | Ses Stresi: ${AppState.stressLevel}`;
+            } else {
+                updateBadge("Yüz Aranıyor...", "#fff", "rgba(239, 68, 68, 0.8)");
+                emotionResult.innerText = "Yüz algılanamadı";
+            }
         }
-    }
-};
+    };
+} catch (e) {
+    console.error("Worker başlatılamadı (Muhtemelen tarayıcı güvenlik politikası). Yedek plan aktif.");
+    updateBadge("Worker Hatası, Yedek Çalışıyor", "#fbbf24", "rgba(251, 191, 36, 0.2)");
+}
 
 function updateBadge(text, color, bg) {
     faceStatus.innerText = text;
@@ -87,9 +92,10 @@ if (SpeechRecognition) {
     recognition.lang = 'tr-TR';
 
     recognition.onstart = () => {
+        console.log("Mikrofon başladı.");
         AppState.isSpeechActive = true;
         if (AppState.transcript === "") {
-            transcriptResult.innerText = "Mikrofon dinleniyor...";
+            transcriptResult.innerText = "Sizi dinliyorum, lütfen konuşun...";
         }
     };
 
@@ -117,17 +123,22 @@ if (SpeechRecognition) {
     recognition.onerror = (e) => {
         console.error("Speech Error:", e.error);
         AppState.isSpeechActive = false;
-        if(e.error === 'not-allowed') transcriptResult.innerText = "HATA: Mikrofon İzni Yok!";
-        else restartSpeech();
+        if(e.error === 'not-allowed') {
+            transcriptResult.innerText = "HATA: Tarayıcınızda (Adres çubuğundaki kilit simgesinden) mikrofona izin verin!";
+        } else {
+            // Küçük hataları yoksay ve sessizce restart at
+            setTimeout(restartSpeech, 1000);
+        }
     };
 
     recognition.onend = () => {
+        console.log("Mikrofon durdu.");
         AppState.isSpeechActive = false;
         if (AppState.isAnalyzing) restartSpeech();
     };
 
 } else {
-    transcriptResult.innerHTML = "<span style='color:#ef4444'>Tarayıcınız ses tanımayı desteklemiyor.</span>";
+    transcriptResult.innerHTML = "<span style='color:#ef4444'>Tarayıcınız ses tanımayı (mikrofonu) desteklemiyor. Lütfen Chrome veya Edge kullanın.</span>";
 }
 
 function restartSpeech() {
@@ -142,13 +153,8 @@ function restartSpeech() {
 
 // 4. BAŞLATMA / DURDURMA FONKSİYONLARI
 startBtn.addEventListener('click', async () => {
-    if (!AppState.workerReady) {
-        alert("Modeller yükleniyor, lütfen bekleyin.");
-        return;
-    }
-
     try {
-        updateBadge("Kamera İzni Bekleniyor", "#fbbf24", "rgba(251, 191, 36, 0.2)");
+        updateBadge("Kamera/Mikrofon İzni Bekleniyor", "#fbbf24", "rgba(251, 191, 36, 0.2)");
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         video.srcObject = stream;
         
@@ -158,30 +164,37 @@ startBtn.addEventListener('click', async () => {
         AppState.transcript = "";
         
         setupAudioAnalysis(stream);
-        restartSpeech();
+        
+        // Mikrofonu BİLİNÇLİ başlat
+        setTimeout(() => {
+            if (recognition) {
+                try { recognition.start(); } catch(e) { console.error("Speech start error", e); }
+            }
+        }, 1000); // Kamera açıldıktan 1 sn sonra mikrofonu garantile
         
         video.addEventListener('play', () => {
-            const width = video.videoWidth;
-            const height = video.videoHeight;
-            
-            overlay.width = video.clientWidth;
-            overlay.height = video.clientHeight;
-            
-            hiddenCanvas.width = width;
-            hiddenCanvas.height = height;
+            if (faceWorker && AppState.workerReady) {
+                const width = video.videoWidth;
+                const height = video.videoHeight;
+                
+                overlay.width = video.clientWidth;
+                overlay.height = video.clientHeight;
+                
+                hiddenCanvas.width = width;
+                hiddenCanvas.height = height;
 
-            // Worker'a kare gönderme (CPU dostu: 5 FPS - 200ms)
-            AppState.detectIntervalId = setInterval(() => {
-                if (!AppState.isAnalyzing) return;
-                hiddenCtx.drawImage(video, 0, 0, width, height);
-                const imageData = hiddenCtx.getImageData(0, 0, width, height);
-                faceWorker.postMessage({ type: 'DETECT', imageData, width, height });
-            }, 200);
+                AppState.detectIntervalId = setInterval(() => {
+                    if (!AppState.isAnalyzing) return;
+                    hiddenCtx.drawImage(video, 0, 0, width, height);
+                    const imageData = hiddenCtx.getImageData(0, 0, width, height);
+                    faceWorker.postMessage({ type: 'DETECT', imageData, width, height });
+                }, 200);
+            }
         }, { once: true });
 
     } catch (err) {
         updateBadge("İzin Reddedildi", "#ef4444", "rgba(239, 68, 68, 0.2)");
-        alert("Kamera ve mikrofon izni verilmelidir.");
+        alert("Kamera ve mikrofon iznini adres çubuğundan (kilit simgesinden) verip sayfayı yenileyin.");
     }
 });
 
@@ -200,16 +213,17 @@ stopBtn.addEventListener('click', () => {
     analyzeBtn.disabled = true;
     
     if (recognition) {
-        recognition.onend = null; // Restart loop'u kır
-        recognition.stop();
+        recognition.onend = null;
+        try { recognition.stop(); } catch(e) {}
     }
     
     emotionResult.innerText = "Bekleniyor...";
+    transcriptResult.innerText = "Söyledikleriniz burada görünecek...";
     updateBadge("Durduruldu", "#94a3b8", "rgba(148, 163, 184, 0.2)");
     overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
 });
 
-// 5. AUDIO CONTEXT OPTİMİZASYONU (300ms Interval)
+// 5. AUDIO CONTEXT OPTİMİZASYONU
 let audioContext, analyser, dataArray;
 
 function setupAudioAnalysis(stream) {
@@ -218,7 +232,7 @@ function setupAudioAnalysis(stream) {
     const microphone = audioContext.createMediaStreamSource(stream);
     microphone.connect(analyser);
     
-    analyser.fftSize = 256; // Optimizasyon
+    analyser.fftSize = 256;
     dataArray = new Uint8Array(analyser.frequencyBinCount);
 
     AppState.audioIntervalId = setInterval(() => {
@@ -233,16 +247,17 @@ function setupAudioAnalysis(stream) {
         else if (average > 40) AppState.stressLevel = "Orta";
         else AppState.stressLevel = "Düşük (Sakin)";
         
-    }, 300); // 3 FPS Audio Analysis (CPU Dostu)
+    }, 300);
 }
 
-// 6. YAPAY ZEKA ANALİZ (AbortController ile Güvenli Fetch)
+// 6. YAPAY ZEKA ANALİZ
 let fetchController;
 
 analyzeBtn.addEventListener('click', async () => {
-    const textToAnalyze = transcriptResult.innerText.replace("Mikrofon dinleniyor...", "").trim();
+    const textToAnalyze = transcriptResult.innerText.replace("Sizi dinliyorum, lütfen konuşun...", "").replace("Mikrofon dinleniyor...", "").trim();
+    
     if (textToAnalyze.length < 2) {
-        alert("Lütfen önce bir şeyler söyleyin.");
+        alert("Lütfen önce bir şeyler söyleyin (Mikrofonun sesinizi aldığından emin olun).");
         return;
     }
     if (apiKey.value.trim() === "") {
@@ -252,9 +267,9 @@ analyzeBtn.addEventListener('click', async () => {
 
     analyzeBtn.disabled = true;
     AppState.transcript = ""; // Yeni cümleye hazır
-    transcriptResult.innerText = "Yeni analiz için konuşabilirsiniz...";
+    transcriptResult.innerText = "Sizi dinliyorum, yeni analiz için konuşabilirsiniz...";
 
-    if (fetchController) fetchController.abort(); // Eski fetch'i iptal et (Spam koruması)
+    if (fetchController) fetchController.abort();
     fetchController = new AbortController();
 
     const modelType = aiModel.value;
@@ -262,7 +277,7 @@ analyzeBtn.addEventListener('click', async () => {
     
     aiResult.innerHTML = `
         <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9em; color:#94a3b8;">
-            <span>Yapay Zeka Yükleniyor...</span>
+            <span>Yapay Zeka Sunucuya Bağlanıyor...</span>
             <span id="aiProgressText">0%</span>
         </div>
         <div style="width:100%; height:6px; background:#334155; border-radius:3px; overflow:hidden;">
@@ -316,7 +331,7 @@ analyzeBtn.addEventListener('click', async () => {
 
     } catch (err) {
         clearInterval(progressInterval);
-        if (err.name === 'AbortError') return; // Fetch iptal edildiyse hata verme
+        if (err.name === 'AbortError') return;
         
         progressBar.style.background = '#ef4444';
         progressText.innerText = 'HATA';
