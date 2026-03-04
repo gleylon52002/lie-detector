@@ -10,27 +10,65 @@ const transcriptResult = document.getElementById('transcriptResult');
 const aiResult = document.getElementById('aiResult');
 const faceStatus = document.getElementById('faceStatus');
 
-let isAnalyzing = false;
-let currentEmotion = "Nötr";
-let recognition;
-let detectInterval;
-let audioContext, analyser, microphone, dataArray;
-let currentVocalStress = "Düşük";
-let fullTranscriptBuffer = "";
+// 1. GLOBAL STATE MANAGER
+const AppState = {
+    isAnalyzing: false,
+    faceEmotion: "Nötr",
+    stressLevel: "Düşük",
+    transcript: "",
+    isSpeechActive: false,
+    workerReady: false,
+    detectIntervalId: null,
+    audioIntervalId: null
+};
 
-// 1. Modelleri Yükle
-Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri('https://vladmandic.github.io/face-api/model/'),
-    faceapi.nets.faceExpressionNet.loadFromUri('https://vladmandic.github.io/face-api/model/')
-]).then(() => {
-    startBtn.innerText = "Sistemi Başlat";
-    startBtn.disabled = false;
-    updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
-}).catch(err => {
-    console.error("Modeller yüklenemedi:", err);
-    startBtn.innerText = "Model Yükleme Hatası";
-    updateBadge("Bağlantı Hatası", "#ef4444", "rgba(239, 68, 68, 0.2)");
-});
+// 2. WEB WORKER SETUP (Ağır İşlemi Ana Threadden Çıkarıyoruz)
+const faceWorker = new Worker('faceWorker.js');
+const hiddenCanvas = document.createElement('canvas');
+const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+
+faceWorker.postMessage({ type: 'INIT' });
+
+faceWorker.onmessage = (e) => {
+    if (e.data.type === 'STATUS') {
+        if (e.data.status === 'READY') {
+            AppState.workerReady = true;
+            startBtn.innerText = "Sistemi Başlat";
+            startBtn.disabled = false;
+            updateBadge("Sistem Hazır", "#4ade80", "rgba(74, 222, 128, 0.2)");
+        } else {
+            console.error(e.data.error);
+            updateBadge("Model Yükleme Hatası", "#ef4444", "rgba(239, 68, 68, 0.2)");
+        }
+    }
+
+    if (e.data.type === 'RESULT' && AppState.isAnalyzing) {
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (e.data.success) {
+            updateBadge("Yüz Tespit Edildi", "#fff", "rgba(59, 130, 246, 0.8)");
+            
+            // Koordinatları manuel çiz
+            const box = e.data.box;
+            ctx.strokeStyle = "#4ade80";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(box.x, box.y, box.width, box.height);
+            
+            const trEmotions = {
+                neutral: "Nötr", happy: "Mutlu", sad: "Üzgün", angry: "Kızgın",
+                fearful: "Stresli/Korkmuş", disgusted: "Tiksinti", surprised: "Şaşkın"
+            };
+            AppState.faceEmotion = trEmotions[e.data.emotion] || e.data.emotion;
+            const percent = Math.round(e.data.expressions[e.data.emotion] * 100);
+            
+            emotionResult.innerText = `${AppState.faceEmotion} (%${percent}) | Ses Stresi: ${AppState.stressLevel}`;
+        } else {
+            updateBadge("Yüz Aranıyor...", "#fff", "rgba(239, 68, 68, 0.8)");
+            emotionResult.innerText = "Yüz algılanamadı";
+        }
+    }
+};
 
 function updateBadge(text, color, bg) {
     faceStatus.innerText = text;
@@ -38,8 +76,10 @@ function updateBadge(text, color, bg) {
     faceStatus.style.background = bg;
 }
 
-// 2. Ses Analizi (Anlık Metin) - DAHA SAĞLAM YAPI
+// 3. WEB SPEECH API STABILIZASYONU (Event Driven & Auto Restart)
+let recognition;
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
 if (SpeechRecognition) {
     recognition = new SpeechRecognition();
     recognition.continuous = true;
@@ -47,8 +87,9 @@ if (SpeechRecognition) {
     recognition.lang = 'tr-TR';
 
     recognition.onstart = () => {
-        if(isAnalyzing && fullTranscriptBuffer === "") {
-            transcriptResult.innerText = "Mikrofon dinleniyor, lütfen konuşun...";
+        AppState.isSpeechActive = true;
+        if (AppState.transcript === "") {
+            transcriptResult.innerText = "Mikrofon dinleniyor...";
         }
     };
 
@@ -64,178 +105,164 @@ if (SpeechRecognition) {
             }
         }
 
-        fullTranscriptBuffer += finalTranscriptPiece;
-        let currentDisplay = (fullTranscriptBuffer + interimTranscript).trim();
+        AppState.transcript += finalTranscriptPiece;
+        let currentDisplay = (AppState.transcript + interimTranscript).trim();
         
-        if(currentDisplay.length > 0) {
+        if (currentDisplay.length > 0) {
             transcriptResult.innerText = currentDisplay;
             analyzeBtn.disabled = false;
         }
     };
 
     recognition.onerror = (e) => {
-        console.error("Ses tanıma hatası:", e.error);
-        if(e.error === 'not-allowed') {
-            transcriptResult.innerText = "HATA: Mikrofon izni verilmemiş!";
-        } else if (e.error === 'no-speech') {
-            // Ses gelmedi, yeniden başlatmaya çalışacak
-        } else {
-            transcriptResult.innerText = "Ses Hatası: " + e.error;
-        }
+        console.error("Speech Error:", e.error);
+        AppState.isSpeechActive = false;
+        if(e.error === 'not-allowed') transcriptResult.innerText = "HATA: Mikrofon İzni Yok!";
+        else restartSpeech();
     };
 
-    // Ses tanıma kendi kendine durursa (Chrome'un kronik sorunu), otomatik yeniden başlat
     recognition.onend = () => {
-        if (isAnalyzing) {
-            try { recognition.start(); } catch(e) {}
-        }
+        AppState.isSpeechActive = false;
+        if (AppState.isAnalyzing) restartSpeech();
     };
 
 } else {
-    transcriptResult.innerHTML = "<span style='color:#ef4444'>Tarayıcınız ses tanımayı desteklemiyor. Lütfen Chrome, Edge veya Safari kullanın.</span>";
+    transcriptResult.innerHTML = "<span style='color:#ef4444'>Tarayıcınız ses tanımayı desteklemiyor.</span>";
 }
 
-// 3. Başlatma Fonksiyonu
+function restartSpeech() {
+    if (!AppState.isAnalyzing) return;
+    try { recognition.stop(); } catch(e) {}
+    setTimeout(() => {
+        if (AppState.isAnalyzing && !AppState.isSpeechActive) {
+            try { recognition.start(); } catch(e) {}
+        }
+    }, 500);
+}
+
+// 4. BAŞLATMA / DURDURMA FONKSİYONLARI
 startBtn.addEventListener('click', async () => {
+    if (!AppState.workerReady) {
+        alert("Modeller yükleniyor, lütfen bekleyin.");
+        return;
+    }
+
     try {
         updateBadge("Kamera İzni Bekleniyor", "#fbbf24", "rgba(251, 191, 36, 0.2)");
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         video.srcObject = stream;
+        
+        AppState.isAnalyzing = true;
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        isAnalyzing = true;
-        fullTranscriptBuffer = "";
-        
-        if (SpeechRecognition) {
-            transcriptResult.innerText = "Mikrofon başlatılıyor...";
-        }
+        AppState.transcript = "";
         
         setupAudioAnalysis(stream);
-
-        if (recognition) {
-            try { recognition.start(); } catch(e) {}
-        }
+        restartSpeech();
         
         video.addEventListener('play', () => {
-            const displaySize = { width: video.clientWidth, height: video.clientHeight };
-            overlay.width = displaySize.width;
-            overlay.height = displaySize.height;
-            faceapi.matchDimensions(overlay, displaySize);
-            detectFace(displaySize);
-        });
+            const width = video.videoWidth;
+            const height = video.videoHeight;
+            
+            overlay.width = video.clientWidth;
+            overlay.height = video.clientHeight;
+            
+            hiddenCanvas.width = width;
+            hiddenCanvas.height = height;
+
+            // Worker'a kare gönderme (CPU dostu: 5 FPS - 200ms)
+            AppState.detectIntervalId = setInterval(() => {
+                if (!AppState.isAnalyzing) return;
+                hiddenCtx.drawImage(video, 0, 0, width, height);
+                const imageData = hiddenCtx.getImageData(0, 0, width, height);
+                faceWorker.postMessage({ type: 'DETECT', imageData, width, height });
+            }, 200);
+        }, { once: true });
+
     } catch (err) {
         updateBadge("İzin Reddedildi", "#ef4444", "rgba(239, 68, 68, 0.2)");
-        alert("Kamera ve mikrofon izni vermeniz gerekiyor.");
+        alert("Kamera ve mikrofon izni verilmelidir.");
     }
 });
 
 stopBtn.addEventListener('click', () => {
+    AppState.isAnalyzing = false;
+    
     const stream = video.srcObject;
     if (stream) stream.getTracks().forEach(track => track.stop());
     if (audioContext) audioContext.close();
     
-    isAnalyzing = false;
+    clearInterval(AppState.detectIntervalId);
+    clearInterval(AppState.audioIntervalId);
+    
     startBtn.disabled = false;
     stopBtn.disabled = true;
     analyzeBtn.disabled = true;
-    clearTimeout(detectInterval);
-    if (recognition) recognition.stop();
+    
+    if (recognition) {
+        recognition.onend = null; // Restart loop'u kır
+        recognition.stop();
+    }
     
     emotionResult.innerText = "Bekleniyor...";
     updateBadge("Durduruldu", "#94a3b8", "rgba(148, 163, 184, 0.2)");
-    const context = overlay.getContext('2d');
-    context.clearRect(0, 0, overlay.width, overlay.height);
+    overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
 });
 
-// Manuel AI Tetikleyici
-analyzeBtn.addEventListener('click', () => {
-    const textToAnalyze = transcriptResult.innerText.replace("Mikrofon dinleniyor, lütfen konuşun...", "").replace("Mikrofon başlatılıyor...", "").trim();
-    if (textToAnalyze.length < 2) {
-        alert("Lütfen önce bir şeyler söyleyin (veya mikrofonun sizi duyduğundan emin olun).");
-        return;
-    }
-    if (apiKey.value.trim() === "") {
-        alert("Lütfen API anahtarınızı girin.");
-        return;
-    }
-    analyzeWithAI(textToAnalyze, currentEmotion, currentVocalStress);
-    // Yeni cümleler için buffer'ı temizle
-    fullTranscriptBuffer = "";
-    transcriptResult.innerText = "Yeni analiz için konuşabilirsiniz...";
-    analyzeBtn.disabled = true;
-});
+// 5. AUDIO CONTEXT OPTİMİZASYONU (300ms Interval)
+let audioContext, analyser, dataArray;
 
-// 4. Ses Tonu & Stres Analizi
 function setupAudioAnalysis(stream) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioContext.createAnalyser();
-    microphone = audioContext.createMediaStreamSource(stream);
+    const microphone = audioContext.createMediaStreamSource(stream);
     microphone.connect(analyser);
-    analyser.fftSize = 256;
+    
+    analyser.fftSize = 256; // Optimizasyon
     dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-    function checkStress() {
-        if (!isAnalyzing) return;
+    AppState.audioIntervalId = setInterval(() => {
+        if (!AppState.isAnalyzing) return;
         analyser.getByteFrequencyData(dataArray);
         
         let sum = 0;
         for(let i=0; i<dataArray.length; i++) sum += dataArray[i];
         let average = sum / dataArray.length;
 
-        if (average > 80) currentVocalStress = "Yüksek (Gergin/Tiz)";
-        else if (average > 40) currentVocalStress = "Orta";
-        else currentVocalStress = "Düşük (Sakin)";
+        if (average > 80) AppState.stressLevel = "Yüksek (Gergin/Tiz)";
+        else if (average > 40) AppState.stressLevel = "Orta";
+        else AppState.stressLevel = "Düşük (Sakin)";
         
-        requestAnimationFrame(checkStress);
-    }
-    checkStress();
+    }, 300); // 3 FPS Audio Analysis (CPU Dostu)
 }
 
-// 5. Yüz Tespiti Döngüsü
-async function detectFace(displaySize) {
-    if (!isAnalyzing) return;
+// 6. YAPAY ZEKA ANALİZ (AbortController ile Güvenli Fetch)
+let fetchController;
 
-    displaySize = { width: video.clientWidth, height: video.clientHeight };
-    faceapi.matchDimensions(overlay, displaySize);
-
-    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.2 });
-    const detections = await faceapi.detectSingleFace(video, options).withFaceExpressions();
-    
-    const context = overlay.getContext('2d');
-    context.clearRect(0, 0, overlay.width, overlay.height);
-
-    if (detections) {
-        updateBadge("Yüz Tespit Edildi", "#fff", "rgba(59, 130, 246, 0.8)");
-        
-        const resizedDetections = faceapi.resizeResults(detections, displaySize);
-        faceapi.draw.drawDetections(overlay, resizedDetections);
-        
-        const expressions = detections.expressions;
-        const dominantEmotion = Object.keys(expressions).reduce((a, b) => expressions[a] > expressions[b] ? a : b);
-        
-        const trEmotions = {
-            neutral: "Nötr", happy: "Mutlu", sad: "Üzgün", angry: "Kızgın",
-            fearful: "Stresli/Korkmuş", disgusted: "Tiksinti", surprised: "Şaşkın"
-        };
-        currentEmotion = trEmotions[dominantEmotion] || dominantEmotion;
-        emotionResult.innerText = `${currentEmotion} (%${Math.round(expressions[dominantEmotion] * 100)}) | Ses Stresi: ${currentVocalStress}`;
-        
-    } else {
-        updateBadge("Yüz Aranıyor...", "#fff", "rgba(239, 68, 68, 0.8)");
-        emotionResult.innerText = "Yüz algılanamadı";
+analyzeBtn.addEventListener('click', async () => {
+    const textToAnalyze = transcriptResult.innerText.replace("Mikrofon dinleniyor...", "").trim();
+    if (textToAnalyze.length < 2) {
+        alert("Lütfen önce bir şeyler söyleyin.");
+        return;
+    }
+    if (apiKey.value.trim() === "") {
+        alert("Lütfen API anahtarınızı girin.");
+        return;
     }
 
-    detectInterval = setTimeout(() => detectFace(displaySize), 100);
-}
+    analyzeBtn.disabled = true;
+    AppState.transcript = ""; // Yeni cümleye hazır
+    transcriptResult.innerText = "Yeni analiz için konuşabilirsiniz...";
 
-// 6. Yapay Zeka (İlerleme Çubuğu ve API)
-async function analyzeWithAI(text, emotion, vocalStress) {
+    if (fetchController) fetchController.abort(); // Eski fetch'i iptal et (Spam koruması)
+    fetchController = new AbortController();
+
     const modelType = aiModel.value;
     const key = apiKey.value.trim();
     
     aiResult.innerHTML = `
         <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:0.9em; color:#94a3b8;">
-            <span>Yapay Zeka Sunucuya Bağlanıyor...</span>
+            <span>Yapay Zeka Yükleniyor...</span>
             <span id="aiProgressText">0%</span>
         </div>
         <div style="width:100%; height:6px; background:#334155; border-radius:3px; overflow:hidden;">
@@ -254,14 +281,16 @@ async function analyzeWithAI(text, emotion, vocalStress) {
         progressText.innerText = progress + '%';
     }, 150);
 
-    const prompt = `Bağlam: "${text}". Yüz: ${emotion}. Ses: ${vocalStress}. Profil Uzmanı: Yalan mı söylüyor, gergin mi? Tek cümlelik sert teşhis koy. (Markdown yok)`;
+    const prompt = `Bağlam: "${textToAnalyze}". Yüz: ${AppState.faceEmotion}. Ses: ${AppState.stressLevel}. Profil Uzmanı: Yalan mı söylüyor, gergin mi? Tek cümlelik sert teşhis koy. (Markdown yok)`;
 
     try {
         let aiResponse = "";
+        
         if (modelType === "gemini") {
             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+                signal: fetchController.signal
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
@@ -269,7 +298,8 @@ async function analyzeWithAI(text, emotion, vocalStress) {
         } else if (modelType === "openai") {
             const res = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-                body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] })
+                body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] }),
+                signal: fetchController.signal
             });
             const data = await res.json();
             if(data.error) throw new Error(data.error.message);
@@ -286,10 +316,12 @@ async function analyzeWithAI(text, emotion, vocalStress) {
 
     } catch (err) {
         clearInterval(progressInterval);
+        if (err.name === 'AbortError') return; // Fetch iptal edildiyse hata verme
+        
         progressBar.style.background = '#ef4444';
         progressText.innerText = 'HATA';
         setTimeout(() => {
             aiResult.innerHTML = `<span style="color:#ef4444">❌ API Hatası: ${err.message || "Bağlantı kurulamadı."}</span>`;
         }, 500);
     }
-}
+});

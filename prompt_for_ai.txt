@@ -1,0 +1,23 @@
+Ben bir web tabanlı 'Yalan ve Duygu Analizi' (Lie Detector) uygulaması geliştiriyorum. 
+Şu anki altyapım tamamen Client-Side (Tarayıcı taraflı) çalışıyor. HTML, CSS ve saf Vanilla JavaScript (app.js) kullanıyorum. Uygulamam GitHub Pages üzerinde barındırılıyor.
+
+Şu kütüphaneleri ve teknolojileri kullanıyorum:
+1. Yüz Tespiti: face-api.js (vladmandic CDN üzerinden tinyFaceDetector ve faceExpressionNet)
+2. Ses Tanıma (Metne Çevirme): Tarayıcının yerleşik Web Speech API'si (webkitSpeechRecognition)
+3. Ses Frekans/Stres Analizi: AudioContext API (AnalyserNode üzerinden frekans yoğunluğu ölçümü)
+4. AI Karar Motoru: fetch() ile doğrudan Gemini 1.5 Flash veya OpenAI GPT-4o Mini API'sine JSON yolluyorum.
+
+Uygulamanın mantığı:
+Kullanıcı "Sistemi Başlat" diyor, kamera ve mikrofon izni alınıyor.
+face-api.js saniyede 10 kez yüzü tarayıp baskın duyguyu (Mutlu, Stresli, Şaşkın vb.) buluyor.
+AudioContext kullanıcının ses titreşimlerinden stres oranını (Düşük/Orta/Yüksek) belirliyor.
+webkitSpeechRecognition ise kullanıcının söylediklerini anlık (interimResults=true) ekrana döküyor.
+Kullanıcı "AI Analizi Yap" butonuna bastığında bu üç veri (Yüz İfadesi, Ses Stresi, Söylenen Metin) toplanıp API'ye "Sert bir profil uzmanı gibi analiz yap" promptuyla gönderiliyor.
+
+**Yaşadığım Sorun:**
+Tarayıcıda (Kamera ve mikrofon izinleri verilmiş olmasına rağmen) sistem bir bütün olarak "takılıyor" veya çalışmıyor. 
+- Yüz tespiti ekrandaki canvas'a mavi kutu oturtmakta zorlanabiliyor.
+- webkitSpeechRecognition bazen cümlenin ortasında kopuyor, söylenenler ekrana anlık yansımıyor veya hiç tepki vermiyor.
+- AI butonuna basıldığında süreç tam tetiklenmiyor veya API dönüş yapmıyor.
+
+Bana bu bileşenlerin (Kamera + Web Speech API + AudioContext + fetch API) aynı anda, birbirini bloklamadan (Asenkron veya Web Worker kullanarak) ve en stabil şekilde nasıl çalıştırılacağına dair bir "Mimari Çözüm" ve "Hata Ayıklama (Debugging) Stratejisi" sunar mısın? Özellikle Web Speech API'nin stabil kalması ve face-api.js'in ana UI thread'ini dondurmaması için ne yapmalıyım?
