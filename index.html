@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yalan ve Duygu Analizi (AI)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Anlık Duygu ve Yalan Analizi</h1>
+        <p>Kamera ve ses izni vererek anlık duygu değişimlerinizi ve stres seviyenizi analiz edin.</p>
+        
+        <div class="controls">
+            <select id="aiModel">
+                <option value="gemini">Google Gemini 1.5 Pro</option>
+                <option value="openai">OpenAI GPT-4o</option>
+            </select>
+            <input type="password" id="apiKey" placeholder="API Anahtarınızı Girin">
+            <button id="startBtn">Analizi Başlat</button>
+            <button id="stopBtn" disabled>Durdur</button>
+        </div>
+
+        <div class="video-container">
+            <video id="video" autoplay muted></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <div class="analysis-panel">
+            <div class="box">
+                <h3>Tespit Edilen Duygu</h3>
+                <p id="emotionResult">Bekleniyor...</p>
+            </div>
+            <div class="box">
+                <h3>Söylenen Cümle</h3>
+                <p id="transcriptResult">Söyledikleriniz burada görünecek...</p>
+            </div>
+            <div class="box full-width">
+                <h3>Yapay Zeka Yorumu (Yalan/Stres Tespiti)</h3>
+                <p id="aiResult">API anahtarı girip konuştuğunuzda sonuçlar burada belirecek.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- face-api.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+    <script defer src="app.js"></script>
+</body>
+</html>
